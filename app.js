@@ -122,10 +122,11 @@ function stepString(S) {
 
 /* ---------------- Entrées : mains ou pointeur ---------------- */
 let landmarker = null, useCam = false;
-let frame = { hands: [], pairs: [], tips: [] };
+let frame = { hands: [], pairs: [], tips: [], fires: [] };
 const TIPS = [4, 8, 12, 16, 20];           // tous les bouts de doigts peuvent gratter la corde posée
 const MAX_HANDS = 6;
 const pin = new Array(MAX_HANDS).fill(false);   // pincement avec hystérésis, par main
+const openHand = new Array(MAX_HANDS).fill(false);
 // Les mains triées de gauche à droite sont groupées par paires : 6 mains = 3 duos indépendants.
 const duos = [0, 1, 2].map(() => ({
   line: { mode: "none", A: null, B: null, idle: 0 },    // none | drawing (corde en cours de tracé)
@@ -171,11 +172,27 @@ function readHands(now) {
     pairs.push({ sides, together });
   }
   duos.forEach((d, i) => { if (!pairs[i]) d.kame.near = false; });
-  frame = { hands, pairs, tips };
+  // main ouverte vers l'écran : tous les doigts tendus et écartés du pouce
+  const fires = [];
+  hands.forEach((h, i) => {
+    const d = (p, q) => Math.hypot(h[p].x - h[q].x, h[p].y - h[q].y);
+    const size = d(0, 9) || 1;
+    const k = openHand[i] ? 1.05 : 1.2;
+    const open = [[8, 6], [12, 10], [16, 14], [20, 18]].every(([t, pp]) => d(0, t) > k * d(0, pp)) &&
+                 d(4, 8) / size > 0.45 && !pin[i];
+    openHand[i] = open;
+    const K = duos[i >> 1] && duos[i >> 1].kame;
+    if (open && !(K && (K.near || K.state === "charge"))) {
+      let dx = h[9].x - h[0].x, dy = h[9].y - h[0].y; const n = Math.hypot(dx, dy) || 1;
+      fires.push({ x: h[9].x, y: h[9].y, dx: dx / n, dy: dy / n, size, tips: [4, 8, 12, 16, 20].map(j => h[j]) });
+    }
+  });
+  for (let i = hands.length; i < MAX_HANDS; i++) openHand[i] = false;
+  frame = { hands, pairs, tips, fires };
 }
 const ptr = { x: -1, y: -1, down: false };
 function readPointer() {            // repli sans caméra : glisser = tracer, survoler = gratter
-  frame = { hands: [], pairs: [],
+  frame = { hands: [], pairs: [], fires: [],
             tips: ptr.x < 0 || ptr.down ? [] : [{ id: "ptr", x: ptr.x, y: ptr.y }] };
 }
 addEventListener("pointermove", e => {
@@ -432,6 +449,54 @@ function drawKame(K, now) {
 }
 addEventListener("keydown", e => { if (e.key === "k" && ac) fire(duos[0].kame, W * 0.2, H * 0.5, 1, 0, 1); });   // test sans caméra
 
+
+/* ---------------- Feu : main ouverte vers l'écran ---------------- */
+const flames = [];
+let fireAudio = null;
+function fireSoundLoop(n) {                  // souffle de flamme discret tant qu'une main brûle
+  if (!ac) return;
+  if (!fireAudio) {
+    const buf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate), d = buf.getChannelData(0);
+    let b = 0; for (let i = 0; i < d.length; i++) { b = b * 0.97 + (Math.random() * 2 - 1) * 0.3; d[i] = b; }
+    const src = ac.createBufferSource(); src.buffer = buf; src.loop = true;
+    const bp = ac.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = 700; bp.Q.value = 0.6;
+    const g = ac.createGain(); g.gain.value = 0;
+    src.connect(bp).connect(g).connect(ac.destination); src.start();
+    fireAudio = { g, bp };
+  }
+  const t = ac.currentTime;
+  fireAudio.g.gain.setTargetAtTime(Math.min(0.5, n * 0.22), t, 0.1);
+  fireAudio.bp.frequency.setTargetAtTime(500 + Math.random() * 500, t, 0.05);
+}
+function emitFire(f) {
+  const r = f.size * 0.5;
+  for (let i = 0; i < 9 && flames.length < 1800; i++) {
+    const a = Math.random() * 6.283, d = Math.random() * r, sp = 1.5 + Math.random() * 4.5;
+    flames.push({ x: f.x + Math.cos(a) * d, y: f.y + Math.sin(a) * d,
+      vx: f.dx * sp * (f.size / 90) + Math.cos(a) * 1.2, vy: f.dy * sp * (f.size / 90) - 1.2 + Math.sin(a) * 1.2,
+      life: 1, r: f.size * (0.07 + Math.random() * 0.14) });
+  }
+  for (const t of f.tips) if (Math.random() < 0.7 && flames.length < 1800)
+    flames.push({ x: t.x, y: t.y, vx: (Math.random() - .5) * 1.5 + f.dx * 2, vy: -1.5 + f.dy * 2 - Math.random() * 2,
+      life: 0.8, r: f.size * 0.08 });
+}
+function drawFlames() {
+  ctx.save(); ctx.globalCompositeOperation = "lighter";
+  for (let i = flames.length - 1; i >= 0; i--) {
+    const p = flames[i];
+    p.x += p.vx + Math.sin(p.life * 18 + i) * 0.6; p.y += p.vy; p.vy -= 0.06; p.life -= 0.028;
+    if (p.life <= 0) { flames.splice(i, 1); continue; }
+    const l = p.life;                                         // 1 = cœur blanc-jaune, 0 = braise rouge
+    ctx.fillStyle = `hsla(${4 + 40 * l},100%,${28 + 22 * l}%,${0.03 + l * 0.09})`;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * (0.4 + l * 0.7), 0, 7); ctx.fill();
+  }
+  ctx.restore();
+}
+function updateFire() {
+  for (const f of frame.fires) emitFire(f);
+  fireSoundLoop(frame.fires.length);
+}
+
 /* ---------------- Boucle ---------------- */
 let last = -1;
 function loop(now) {
@@ -450,7 +515,7 @@ function loop(now) {
   drawHands();
   const tnow = performance.now();
   duos.forEach((d, i) => { updateLine(d.line, frame.pairs[i]); updateKame(d.kame, frame.pairs[i] && frame.pairs[i].together, tnow); });
-  for (const S of strings) { detectPlucks(S); stepString(S); updateVoice(S); drawString(S, 1); }
+  for (const S of strings) { detectPlucks(S); stepString(S); drawString(S, 1); }
   for (const { line, draft, kame } of duos) {
     if (line.mode === "drawing") {
       draft.A = line.A; draft.B = line.B; drawString(draft, 1);
@@ -458,6 +523,8 @@ function loop(now) {
     } else silence(draft);
     drawKame(kame, tnow);
   }
+  updateFire();
+  drawFlames();
   drawSparks();
 }
 
