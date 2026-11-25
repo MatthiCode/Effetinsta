@@ -122,11 +122,16 @@ function stepString(S) {
 
 /* ---------------- Entrées : mains ou pointeur ---------------- */
 let landmarker = null, useCam = false;
-let frame = { hands: [], sides: null, tips: [] };
+let frame = { hands: [], pairs: [], tips: [] };
 const TIPS = [4, 8, 12, 16, 20];           // tous les bouts de doigts peuvent gratter la corde posée
-const pin = [false, false];                // pincement avec hystérésis (gauche, droite)
-const line = { mode: "none", A: null, B: null, idle: 0 };  // none | drawing (la corde en cours de tracé)
-const draft = newString({ x: 0, y: 0 }, { x: 0, y: 0 });
+const MAX_HANDS = 6;
+const pin = new Array(MAX_HANDS).fill(false);   // pincement avec hystérésis, par main
+// Les mains triées de gauche à droite sont groupées par paires : 6 mains = 3 duos indépendants.
+const duos = [0, 1, 2].map(() => ({
+  line: { mode: "none", A: null, B: null, idle: 0 },    // none | drawing (corde en cours de tracé)
+  draft: newString({ x: 0, y: 0 }, { x: 0, y: 0 }),
+  kame: makeKame() }));
+const line = duos[0].line;                 // pointeur (sans caméra) : duo 0
 
 function toScreen(l) {
   const vw = video.videoWidth, vh = video.videoHeight;
@@ -137,36 +142,40 @@ function readHands(now) {
   const r = landmarker.detectForVideo(video, now);
   const hands = r.landmarks.map(h => h.map(toScreen))
     .sort((a, b) => a[0].x - b[0].x);       // gauche -> droite à l'écran
-  let sides = null;
-  if (hands.length >= 2) {
-    sides = [hands[0], hands[hands.length - 1]].map((h, k) => {
-      const size = Math.hypot(h[0].x - h[9].x, h[0].y - h[9].y) || 1;
-      const r = Math.hypot(h[4].x - h[8].x, h[4].y - h[8].y) / size;
-      pin[k] = pin[k] ? r < 0.42 : r < 0.28;
-      return { pinch: pin[k], mid: { x: (h[4].x + h[8].x) / 2, y: (h[4].y + h[8].y) / 2 } };
-    });
-  } else { pin[0] = pin[1] = false; }
   const tips = [];
   hands.forEach((h, hi) => TIPS.forEach(i => tips.push({ id: hi + "-" + i, ...h[i] })));
-  let together = null;
-  if (hands.length >= 2 && !pin[0] && !pin[1]) {
-    const a = hands[0], b = hands[hands.length - 1];
-    const size = (Math.hypot(a[0].x - a[9].x, a[0].y - a[9].y) + Math.hypot(b[0].x - b[9].x, b[0].y - b[9].y)) / 2 || 1;
-    const dW = Math.hypot(a[0].x - b[0].x, a[0].y - b[0].y) / size;      // poignets
-    const dP = Math.hypot(a[9].x - b[9].x, a[9].y - b[9].y) / size;      // paumes
-    kame.near = kame.near ? dW < 1.7 && dP < 2.4 : dW < 1.1 && dP < 1.7;
-    // direction : là où pointent les doigts (poignet -> milieu de la main)
-    let dx = (a[9].x - a[0].x + b[9].x - b[0].x) / 2, dy = (a[9].y - a[0].y + b[9].y - b[0].y) / 2;
-    const cx = (a[9].x + b[9].x) / 2, cy = (a[9].y + b[9].y) / 2;
-    if (Math.hypot(dx, dy) < size * 0.5) { dx = cx < W / 2 ? 1 : -1; dy = 0; }   // doigts vers la caméra : tir à l'horizontale
-    const n = Math.hypot(dx, dy) || 1;
-    together = { x: cx, y: cy, dx: dx / n, dy: dy / n, near: kame.near };
-  } else kame.near = false;
-  frame = { hands, sides, tips, together };
+  for (let i = hands.length; i < MAX_HANDS; i++) pin[i] = false;
+  const pairs = [];
+  for (let k = 0; k + 1 < hands.length; k += 2) {
+    const a = hands[k], b = hands[k + 1];
+    const sides = [a, b].map((h, j) => {
+      const size = Math.hypot(h[0].x - h[9].x, h[0].y - h[9].y) || 1;
+      const r = Math.hypot(h[4].x - h[8].x, h[4].y - h[8].y) / size;
+      pin[k + j] = pin[k + j] ? r < 0.42 : r < 0.28;
+      return { pinch: pin[k + j], mid: { x: (h[4].x + h[8].x) / 2, y: (h[4].y + h[8].y) / 2 } };
+    });
+    const K = duos[k / 2].kame;
+    let together = null;
+    if (!sides[0].pinch && !sides[1].pinch) {
+      const size = (Math.hypot(a[0].x - a[9].x, a[0].y - a[9].y) + Math.hypot(b[0].x - b[9].x, b[0].y - b[9].y)) / 2 || 1;
+      const dW = Math.hypot(a[0].x - b[0].x, a[0].y - b[0].y) / size;      // poignets
+      const dP = Math.hypot(a[9].x - b[9].x, a[9].y - b[9].y) / size;      // paumes
+      K.near = K.near ? dW < 1.7 && dP < 2.4 : dW < 1.1 && dP < 1.7;
+      // direction : là où pointent les doigts (poignet -> milieu de la main)
+      let dx = (a[9].x - a[0].x + b[9].x - b[0].x) / 2, dy = (a[9].y - a[0].y + b[9].y - b[0].y) / 2;
+      const cx = (a[9].x + b[9].x) / 2, cy = (a[9].y + b[9].y) / 2;
+      if (Math.hypot(dx, dy) < size * 0.5) { dx = cx < W / 2 ? 1 : -1; dy = 0; }   // doigts vers la caméra
+      const n = Math.hypot(dx, dy) || 1;
+      together = { x: cx, y: cy, dx: dx / n, dy: dy / n, near: K.near };
+    } else K.near = false;
+    pairs.push({ sides, together });
+  }
+  duos.forEach((d, i) => { if (!pairs[i]) d.kame.near = false; });
+  frame = { hands, pairs, tips };
 }
 const ptr = { x: -1, y: -1, down: false };
 function readPointer() {            // repli sans caméra : glisser = tracer, survoler = gratter
-  frame = { hands: [], sides: null,
+  frame = { hands: [], pairs: [],
             tips: ptr.x < 0 || ptr.down ? [] : [{ id: "ptr", x: ptr.x, y: ptr.y }] };
 }
 addEventListener("pointermove", e => {
@@ -180,11 +189,11 @@ addEventListener("pointerdown", e => {
 });
 addEventListener("pointerup", () => {
   if (useCam || !ptr.down) return;
-  ptr.down = false; settle();
+  ptr.down = false; settle(line);
 });
 
 /* ---------------- Tracer / poser la corde ---------------- */
-function settle() {
+function settle(line) {
   const L = Math.hypot(line.B.x - line.A.x, line.B.y - line.A.y);
   line.mode = "none";
   if (L < 80) return;
@@ -194,9 +203,9 @@ function settle() {
   pluck(S, 0.5, 10); note(freqFromLength(L), 0.1);
   save();
 }
-function updateLine() {
+function updateLine(line, pair) {
   if (!useCam) return;
-  const s = frame.sides;
+  const s = pair && pair.sides;
   if (line.mode !== "drawing") {
     if (s && s[0].pinch && s[1].pinch) {      // deux mains pincées : on commence à tracer
       line.mode = "drawing"; line.idle = 0;
@@ -208,7 +217,7 @@ function updateLine() {
   if (s && s[1].pinch) line.B = { ...s[1].mid };
   const any = s && (s[0].pinch || s[1].pinch);
   line.idle = any ? 0 : line.idle + 1;
-  if (line.idle > 5) settle();                // plus aucune main ne pince : la corde se pose
+  if (line.idle > 5) settle(line);            // plus aucune main ne pince : la corde se pose
 }
 
 /* ---------------- Détection du passage d'un doigt ---------------- */
@@ -306,7 +315,7 @@ function drawSparks() {
 
 
 /* ---------------- Kaméhaméha : on colle les deux mains ---------------- */
-const kame = { near: false, state: "idle", t0: 0, c: 0, x: 0, y: 0, dx: 1, dy: 0, cool: 0, beam: null, cv: null };
+function makeKame() { return { near: false, state: "idle", t0: 0, c: 0, x: 0, y: 0, dx: 1, dy: 0, cool: 0, beam: null, cv: null }; }
 const CHARGE_MS = 1100;
 
 function say(text) {
@@ -316,24 +325,24 @@ function say(text) {
     speechSynthesis.cancel(); speechSynthesis.speak(u);
   } catch {}
 }
-function chargeSound(c) {                 // grésillement qui monte pendant la charge
+function chargeSound(K, c) {                 // grésillement qui monte pendant la charge
   if (!ac) return;
   const t = ac.currentTime;
   if (c === null) {
-    if (kame.cv) { const v = kame.cv; kame.cv = null; v.g.gain.setTargetAtTime(0, t, 0.05); v.o.stop(t + 0.4); v.l.stop(t + 0.4); }
+    if (K.cv) { const v = K.cv; K.cv = null; v.g.gain.setTargetAtTime(0, t, 0.05); v.o.stop(t + 0.4); v.l.stop(t + 0.4); }
     return;
   }
-  if (!kame.cv) {
+  if (!K.cv) {
     const o = ac.createOscillator(), g = ac.createGain(), lp = ac.createBiquadFilter();
     const l = ac.createOscillator(), lg = ac.createGain();       // vibrato
     o.type = "sawtooth"; lp.type = "lowpass"; lp.frequency.value = 900; g.gain.value = 0;
     l.frequency.value = 14; lg.gain.value = 18; l.connect(lg).connect(o.frequency);
     o.connect(lp).connect(g).connect(ac.destination); o.start(); l.start();
-    kame.cv = { o, g, l, lp };
+    K.cv = { o, g, l, lp };
   }
-  kame.cv.o.frequency.setTargetAtTime(70 + 420 * c * c, t, 0.03);
-  kame.cv.lp.frequency.setTargetAtTime(500 + 2500 * c, t, 0.03);
-  kame.cv.g.gain.setTargetAtTime(0.03 + 0.1 * c, t, 0.05);
+  K.cv.o.frequency.setTargetAtTime(70 + 420 * c * c, t, 0.03);
+  K.cv.lp.frequency.setTargetAtTime(500 + 2500 * c, t, 0.03);
+  K.cv.g.gain.setTargetAtTime(0.03 + 0.1 * c, t, 0.05);
 }
 function fireSound(power) {
   if (!ac) return;
@@ -353,10 +362,10 @@ function fireSound(power) {
   og.gain.exponentialRampToValueAtTime(0.0001, t + dur);
   o.connect(og).connect(ac.destination); o.start(t); o.stop(t + dur);
 }
-function fire(x, y, dx, dy, power) {
-  chargeSound(null);
-  kame.state = "cool"; kame.cool = performance.now() + 900;
-  kame.beam = { x, y, dx, dy, power, t0: performance.now() };
+function fire(K, x, y, dx, dy, power) {
+  chargeSound(K, null);
+  K.state = "cool"; K.cool = performance.now() + 900;
+  K.beam = { x, y, dx, dy, power, t0: performance.now() };
   fireSound(power); say("波ー！");
   // le rayon fait vibrer les cordes qu'il traverse
   for (const S of strings) {
@@ -369,42 +378,41 @@ function fire(x, y, dx, dy, power) {
   for (let i = 0; i < 80; i++) { const a = Math.random() * 6.28, sp = 1 + Math.random() * 6;
     sparks.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 1, h: 190 + Math.random() * 30 }); }
 }
-function updateKame(now) {
-  const T = frame.together;
-  if (kame.state === "cool") { if (now > kame.cool && !(T && T.near)) kame.state = "idle"; return; }
-  if (kame.state === "idle") {
-    if (T && T.near) { kame.state = "charge"; kame.t0 = now; say("かめはめ…"); }
+function updateKame(K, T, now) {
+  if (K.state === "cool") { if (now > K.cool && !(T && T.near)) K.state = "idle"; return; }
+  if (K.state === "idle") {
+    if (T && T.near) { K.state = "charge"; K.t0 = now; say("かめはめ…"); }
     return;
   }
   // en charge
-  if (T) { kame.x = T.x; kame.y = T.y; kame.dx = T.dx; kame.dy = T.dy; }
-  kame.c = Math.min(1, (now - kame.t0) / CHARGE_MS);
+  if (T) { K.x = T.x; K.y = T.y; K.dx = T.dx; K.dy = T.dy; }
+  K.c = Math.min(1, (now - K.t0) / CHARGE_MS);
   const still = T && T.near;
-  chargeSound(kame.c);
-  if (kame.c >= 1) fire(kame.x, kame.y, kame.dx, kame.dy, 1);
+  chargeSound(K, K.c);
+  if (K.c >= 1) fire(K, K.x, K.y, K.dx, K.dy, 1);
   else if (!still) {                                     // mains écartées avant la fin
-    if (kame.c > 0.35) fire(kame.x, kame.y, kame.dx, kame.dy, kame.c);
-    else { chargeSound(null); kame.state = "idle"; }
+    if (K.c > 0.35) fire(K, K.x, K.y, K.dx, K.dy, K.c);
+    else { chargeSound(K, null); K.state = "idle"; }
   }
-  if (kame.state === "charge") {                          // énergie aspirée vers la boule
+  if (K.state === "charge") {                          // énergie aspirée vers la boule
     if (Math.random() < 0.8) { const a = Math.random() * 6.28, r = 60 + 80 * Math.random();
-      sparks.push({ x: kame.x + Math.cos(a) * r, y: kame.y + Math.sin(a) * r,
+      sparks.push({ x: K.x + Math.cos(a) * r, y: K.y + Math.sin(a) * r,
         vx: -Math.cos(a) * 2.2, vy: -Math.sin(a) * 2.2, life: .6, h: 195 + Math.random() * 25 }); }
   }
 }
-function drawKame(now) {
+function drawKame(K, now) {
   ctx.save(); ctx.globalCompositeOperation = "lighter"; ctx.lineCap = "round";
-  if (kame.state === "charge") {
-    const c = kame.c, r = 14 + 70 * c + Math.sin(now / 40) * 3;
-    const g = ctx.createRadialGradient(kame.x, kame.y, 0, kame.x, kame.y, r * 2);
+  if (K.state === "charge") {
+    const c = K.c, r = 14 + 70 * c + Math.sin(now / 40) * 3;
+    const g = ctx.createRadialGradient(K.x, K.y, 0, K.x, K.y, r * 2);
     g.addColorStop(0, "rgba(255,255,255,1)"); g.addColorStop(0.35, "rgba(120,220,255,.9)");
     g.addColorStop(1, "rgba(0,120,255,0)");
-    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(kame.x, kame.y, r * 2, 0, 7); ctx.fill();
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(K.x, K.y, r * 2, 0, 7); ctx.fill();
   }
-  const b = kame.beam;
+  const b = K.beam;
   if (b) {
     const age = (now - b.t0) / 1000, dur = 1.5;
-    if (age > dur) kame.beam = null;
+    if (age > dur) K.beam = null;
     else {
       const env = Math.max(0, Math.min(1, age / 0.12) * Math.min(1, (dur - age) / 0.5));
       const len = Math.hypot(W, H) * 1.5, wob = 1 + Math.sin(now / 35) * 0.07;
@@ -422,7 +430,7 @@ function drawKame(now) {
   }
   ctx.restore();
 }
-addEventListener("keydown", e => { if (e.key === "k" && ac) fire(W * 0.2, H * 0.5, 1, 0, 1); });   // test sans caméra
+addEventListener("keydown", e => { if (e.key === "k" && ac) fire(duos[0].kame, W * 0.2, H * 0.5, 1, 0, 1); });   // test sans caméra
 
 /* ---------------- Boucle ---------------- */
 let last = -1;
@@ -440,15 +448,16 @@ function loop(now) {
     readPointer();
   }
   drawHands();
-  updateLine();
   const tnow = performance.now();
-  updateKame(tnow);
+  duos.forEach((d, i) => { updateLine(d.line, frame.pairs[i]); updateKame(d.kame, frame.pairs[i] && frame.pairs[i].together, tnow); });
   for (const S of strings) { detectPlucks(S); stepString(S); updateVoice(S); drawString(S, 1); }
-  if (line.mode === "drawing") {
-    draft.A = line.A; draft.B = line.B; drawString(draft, 1);
-    setVoice(draft, freqFromLength(Math.hypot(line.B.x - line.A.x, line.B.y - line.A.y)), 0.04);
-  } else silence(draft);
-  drawKame(tnow);
+  for (const { line, draft, kame } of duos) {
+    if (line.mode === "drawing") {
+      draft.A = line.A; draft.B = line.B; drawString(draft, 1);
+      setVoice(draft, freqFromLength(Math.hypot(line.B.x - line.A.x, line.B.y - line.A.y)), 0.04);
+    } else silence(draft);
+    drawKame(kame, tnow);
+  }
   drawSparks();
 }
 
@@ -467,7 +476,7 @@ document.getElementById("go").onclick = async () => {
       baseOptions: { modelAssetPath:
         "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
         delegate },
-      runningMode: "VIDEO", numHands: 2 });
+      runningMode: "VIDEO", numHands: MAX_HANDS });
     try { landmarker = await make("GPU"); } catch { landmarker = await make("CPU"); }
     useCam = true;
   } catch (e) {
