@@ -19,12 +19,12 @@ addEventListener("resize", resize); resize();
 /* ---------------- Audio ---------------- */
 let ac = null;
 const PENTA = [0, 2, 4, 7, 9];
-function note(freq, vol) {
+function note(freq, vol, bright = 1) {
   if (!ac) return;
   const t = ac.currentTime;
   const g = ac.createGain(), lp = ac.createBiquadFilter();
-  lp.type = "lowpass"; lp.frequency.setValueAtTime(3500, t);
-  lp.frequency.exponentialRampToValueAtTime(500, t + 1.4);
+  lp.type = "lowpass"; lp.frequency.setValueAtTime(Math.min(9000, freq * 6 * bright), t);
+  lp.frequency.exponentialRampToValueAtTime(Math.max(300, freq * 1.5), t + 1.4);
   g.gain.setValueAtTime(0.0001, t);
   g.gain.exponentialRampToValueAtTime(Math.max(0.02, vol), t + 0.008);
   g.gain.exponentialRampToValueAtTime(0.0001, t + 1.6);
@@ -39,8 +39,40 @@ function freqFromLength(len) {            // corde courte = note aiguë
   const x = 1 - Math.min(Math.max(len / W, 0.08), 1);   // 0..0.92
   const step = Math.round(x * 5 * PENTA.length);         // ~5 octaves max
   const oct = Math.floor(step / 5), deg = PENTA[step % 5];
-  return 130.81 * Math.pow(2, (oct * 12 + deg) / 12);
+  return 65.41 * Math.pow(2, (oct * 12 + deg) / 12);   // do grave (corde longue) -> aigu (corde courte)
 }
+
+/* Voix continue : un son tenu tant que la corde vibre, de même hauteur que sa longueur */
+function setVoice(S, freq, level) {
+  if (!ac) return;
+  const t = ac.currentTime;
+  if (level < 0.002) {
+    if (S.voice) {
+      const vc = S.voice; S.voice = null;
+      vc.g.gain.setTargetAtTime(0, t, 0.08);
+      vc.o1.stop(t + 0.6); vc.o2.stop(t + 0.6);
+    }
+    return;
+  }
+  if (!S.voice) {
+    const g = ac.createGain(); g.gain.value = 0;
+    const o1 = ac.createOscillator(), o2 = ac.createOscillator();
+    o1.type = "sine"; o2.type = "triangle";
+    const g2 = ac.createGain(); g2.gain.value = 0.25;
+    o1.connect(g); o2.connect(g2).connect(g); g.connect(ac.destination);
+    o1.start(); o2.start();
+    S.voice = { o1, o2, g };
+  }
+  const vc = S.voice;
+  vc.o1.frequency.setTargetAtTime(freq, t, 0.02);
+  vc.o2.frequency.setTargetAtTime(freq * 2, t, 0.02);
+  vc.g.gain.setTargetAtTime(level, t, 0.04);
+}
+function updateVoice(S) {
+  const L = Math.hypot(S.B.x - S.A.x, S.B.y - S.A.y);
+  setVoice(S, freqFromLength(L), Math.min(0.09, S.energy * 0.01));
+}
+function silence(S) { setVoice(S, 0, 0); }
 
 /* ---------------- Corde (équation d'onde 1D) ---------------- */
 const N = 140;
@@ -144,7 +176,7 @@ function settle() {
   if (L < 80) return;
   const S = newString(line.A, line.B);
   strings.push(S);
-  if (strings.length > MAX_STRINGS) strings.shift();
+  if (strings.length > MAX_STRINGS) silence(strings.shift());
   pluck(S, 0.5, 10); note(freqFromLength(L), 0.1);
   save();
 }
@@ -182,7 +214,7 @@ function detectPlucks(S) {
       const speed = Math.abs(prev - d);
       const amp = Math.min(46, 10 + speed * 1.6) * Math.sign(d - prev) * -1;
       pluck(S, t, amp);
-      note(freqFromLength(L), Math.min(0.35, 0.06 + speed / 120));
+      note(freqFromLength(L), Math.min(0.3, 0.05 + speed / 140), 0.6 + Math.abs(t - 0.5) * 2.4);
       S.hue = (S.hue + 47) % 360;
       for (let i = 0; i < 14; i++) sparks.push({
         x: A.x + dx * t, y: A.y + dy * t,
@@ -275,8 +307,11 @@ function loop(now) {
   }
   drawHands();
   updateLine();
-  for (const S of strings) { detectPlucks(S); stepString(S); drawString(S, 1); }
-  if (line.mode === "drawing") { draft.A = line.A; draft.B = line.B; drawString(draft, 1); }
+  for (const S of strings) { detectPlucks(S); stepString(S); updateVoice(S); drawString(S, 1); }
+  if (line.mode === "drawing") {
+    draft.A = line.A; draft.B = line.B; drawString(draft, 1);
+    setVoice(draft, freqFromLength(Math.hypot(line.B.x - line.A.x, line.B.y - line.A.y)), 0.04);
+  } else silence(draft);
   drawSparks();
 }
 
@@ -306,5 +341,5 @@ document.getElementById("go").onclick = async () => {
 };
 requestAnimationFrame(loop);
 
-document.getElementById("clear").onclick = () => { strings.length = 0; prevSide.clear(); save(); };
+document.getElementById("clear").onclick = () => { strings.forEach(silence); strings.length = 0; prevSide.clear(); save(); };
 restore();
