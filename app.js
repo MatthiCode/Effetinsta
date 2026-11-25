@@ -44,7 +44,7 @@ function freqFromLength(len) {            // corde courte = note aiguë
 
 /* ---------------- Corde (équation d'onde 1D) ---------------- */
 const N = 140;
-const MAX_STRINGS = 12;
+const MAX_STRINGS = 200;
 const strings = [];                                  // cordes posées
 let nextId = 0;
 function newString(A, B) {
@@ -53,6 +53,21 @@ function newString(A, B) {
            energy: 0, hue: (id * 47 + 190) % 360, placedAt: performance.now() };
 }
 const sparks = [];
+
+/* Sauvegarde locale : les traits restent après rechargement (coordonnées relatives à l'écran) */
+const KEY = "corde-de-mains";
+function save() {
+  try {
+    localStorage.setItem(KEY, JSON.stringify(strings.map(S =>
+      [S.A.x / W, S.A.y / H, S.B.x / W, S.B.y / H])));
+  } catch {}
+}
+function restore() {
+  try {
+    for (const [ax, ay, bx, by] of JSON.parse(localStorage.getItem(KEY) || "[]"))
+      strings.push(newString({ x: ax * W, y: ay * H }, { x: bx * W, y: by * H }));
+  } catch {}
+}
 
 function pluck(S, t, amp) {
   const u = S.u;
@@ -131,6 +146,7 @@ function settle() {
   strings.push(S);
   if (strings.length > MAX_STRINGS) strings.shift();
   pluck(S, 0.5, 10); note(freqFromLength(L), 0.1);
+  save();
 }
 function updateLine() {
   if (!useCam) return;
@@ -290,4 +306,5 @@ document.getElementById("go").onclick = async () => {
 };
 requestAnimationFrame(loop);
 
-document.getElementById("clear").onclick = () => { strings.length = 0; prevSide.clear(); };
+document.getElementById("clear").onclick = () => { strings.length = 0; prevSide.clear(); save(); };
+restore();
