@@ -45,7 +45,7 @@ function freqFromLength(len) {            // corde courte = note aiguë
 /* ---------------- Corde (équation d'onde 1D) ---------------- */
 const N = 140;
 const u = new Float32Array(N + 1), v = new Float32Array(N + 1);
-let energy = 0, hue = 190, presence = 0;
+let energy = 0, hue = 190;
 const sparks = [];
 
 function pluck(t, amp) {
@@ -67,8 +67,10 @@ function stepString() {
 
 /* ---------------- Entrées : mains ou pointeur ---------------- */
 let landmarker = null, useCam = false;
-let frame = { hands: [], anchors: null, tips: [] };
-const TIPS = [12, 16, 20];                 // doigts qui grattent (pouce/index = ancres)
+let frame = { hands: [], sides: null, tips: [] };
+const TIPS = [4, 8, 12, 16, 20];           // tous les bouts de doigts peuvent gratter la corde posée
+const pin = [false, false];                // pincement avec hystérésis (gauche, droite)
+const line = { mode: "none", A: null, B: null, placedAt: 0, idle: 0 };  // none | drawing | placed
 
 function toScreen(l) {
   const vw = video.videoWidth, vh = video.videoHeight;
@@ -79,22 +81,62 @@ function readHands(now) {
   const r = landmarker.detectForVideo(video, now);
   const hands = r.landmarks.map(h => h.map(toScreen))
     .sort((a, b) => a[0].x - b[0].x);       // gauche -> droite à l'écran
-  let anchors = null;
+  let sides = null;
   if (hands.length >= 2) {
-    anchors = [hands[0], hands[hands.length - 1]].map(h => ({
-      x: (h[4].x + h[8].x) / 2, y: (h[4].y + h[8].y) / 2 }));
-  }
+    sides = [hands[0], hands[hands.length - 1]].map((h, k) => {
+      const size = Math.hypot(h[0].x - h[9].x, h[0].y - h[9].y) || 1;
+      const r = Math.hypot(h[4].x - h[8].x, h[4].y - h[8].y) / size;
+      pin[k] = pin[k] ? r < 0.42 : r < 0.28;
+      return { pinch: pin[k], mid: { x: (h[4].x + h[8].x) / 2, y: (h[4].y + h[8].y) / 2 } };
+    });
+  } else { pin[0] = pin[1] = false; }
   const tips = [];
   hands.forEach((h, hi) => TIPS.forEach(i => tips.push({ id: hi + "-" + i, ...h[i] })));
-  frame = { hands, anchors, tips };
+  frame = { hands, sides, tips };
 }
 const ptr = { x: -1, y: -1, down: false };
-function readPointer() {
-  frame = { hands: [], anchors: [{ x: W * .15, y: H * .42 }, { x: W * .85, y: H * .42 }],
-            tips: ptr.x < 0 ? [] : [{ id: "ptr", x: ptr.x, y: ptr.y }] };
+function readPointer() {            // repli sans caméra : glisser = tracer, survoler = gratter
+  frame = { hands: [], sides: null,
+            tips: ptr.x < 0 || ptr.down ? [] : [{ id: "ptr", x: ptr.x, y: ptr.y }] };
 }
-addEventListener("pointermove", e => { ptr.x = e.clientX; ptr.y = e.clientY; });
-addEventListener("pointerdown", e => { ptr.x = e.clientX; ptr.y = e.clientY; });
+addEventListener("pointermove", e => {
+  ptr.x = e.clientX; ptr.y = e.clientY;
+  if (!useCam && ptr.down) line.B = { x: ptr.x, y: ptr.y };
+});
+addEventListener("pointerdown", e => {
+  if (useCam || !startEl.classList.contains("hidden")) return;
+  ptr.x = e.clientX; ptr.y = e.clientY; ptr.down = true;
+  line.mode = "drawing"; line.A = { x: ptr.x, y: ptr.y }; line.B = { ...line.A }; u.fill(0); v.fill(0);
+});
+addEventListener("pointerup", () => {
+  if (useCam || !ptr.down) return;
+  ptr.down = false; settle();
+});
+
+/* ---------------- Tracer / poser la corde ---------------- */
+function settle() {
+  const L = Math.hypot(line.B.x - line.A.x, line.B.y - line.A.y);
+  if (L < 80) { line.mode = "none"; return; }
+  line.mode = "placed"; line.placedAt = performance.now(); prevSide.clear();
+  u.fill(0); v.fill(0); pluck(0.5, 10); note(freqFromLength(L), 0.1);
+}
+function updateLine() {
+  if (!useCam) return;
+  const s = frame.sides;
+  if (line.mode !== "drawing") {
+    if (s && s[0].pinch && s[1].pinch) {      // deux mains pincées : on commence à tracer
+      line.mode = "drawing"; line.idle = 0;
+      line.A = { ...s[0].mid }; line.B = { ...s[1].mid };
+      u.fill(0); v.fill(0);
+    }
+    return;
+  }
+  if (s && s[0].pinch) line.A = { ...s[0].mid };
+  if (s && s[1].pinch) line.B = { ...s[1].mid };
+  const any = s && (s[0].pinch || s[1].pinch);
+  line.idle = any ? 0 : line.idle + 1;
+  if (line.idle > 5) settle();                // plus aucune main ne pince : la corde se pose
+}
 
 /* ---------------- Détection du passage d'un doigt ---------------- */
 const prevSide = new Map();
@@ -106,8 +148,9 @@ function detectPlucks(A, B) {
     const t = ((p.x - A.x) * ux + (p.y - A.y) * uy) / L;
     const prev = prevSide.get(p.id);
     prevSide.set(p.id, d);
-    if (prev === undefined || t < 0.03 || t > 0.97) continue;
-    if (Math.sign(prev) !== Math.sign(d) && Math.abs(prev - d) < 160) {
+    if (prev === undefined || t < 0.05 || t > 0.95) continue;
+    if (performance.now() - line.placedAt < 400) continue;   // laisse les doigts se dégager
+    if (Math.sign(prev) !== Math.sign(d) && Math.abs(prev - d) < 160 && Math.abs(prev - d) > 3) {
       const speed = Math.abs(prev - d);
       const amp = Math.min(46, 10 + speed * 1.6) * Math.sign(d - prev) * -1;
       pluck(t, amp);
@@ -202,13 +245,9 @@ function loop(now) {
     readPointer();
   }
   drawHands();
-  const have = !!frame.anchors;
-  presence += ((have ? 1 : 0) - presence) * 0.2;
-  if (have) {
-    detectPlucks(frame.anchors[0], frame.anchors[1]);
-    stepString();
-  } else { u.fill(0); v.fill(0); prevSide.clear(); }
-  if (presence > 0.02 && have) drawString(frame.anchors[0], frame.anchors[1], presence);
+  updateLine();
+  if (line.mode === "placed") { detectPlucks(line.A, line.B); stepString(); }
+  if (line.mode !== "none") drawString(line.A, line.B, 1);
   drawSparks();
 }
 
