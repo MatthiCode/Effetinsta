@@ -1,0 +1,10 @@
+html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,sans-serif;color:#fff}
+#video{display:none}
+#stage{position:fixed;inset:0;width:100%;height:100%;touch-action:none}
+#start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:14px;padding:24px;text-align:center;background:rgba(0,0,0,.72);backdrop-filter:blur(6px);z-index:2}
+#start.hidden{display:none}
+h1{margin:0;font-size:2rem}
+p{margin:0;max-width:30ch;line-height:1.5;opacity:.85}
+button{font:inherit;font-weight:700;padding:14px 26px;border:0;border-radius:999px;background:#fff;color:#000}
+small{opacity:.7;min-height:1.2em}
