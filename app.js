@@ -44,11 +44,18 @@ function freqFromLength(len) {            // corde courte = note aiguë
 
 /* ---------------- Corde (équation d'onde 1D) ---------------- */
 const N = 140;
-const u = new Float32Array(N + 1), v = new Float32Array(N + 1);
-let energy = 0, hue = 190;
+const MAX_STRINGS = 12;
+const strings = [];                                  // cordes posées
+let nextId = 0;
+function newString(A, B) {
+  const id = nextId++;
+  return { id, A, B, u: new Float32Array(N + 1), v: new Float32Array(N + 1),
+           energy: 0, hue: (id * 47 + 190) % 360, placedAt: performance.now() };
+}
 const sparks = [];
 
-function pluck(t, amp) {
+function pluck(S, t, amp) {
+  const u = S.u;
   const k = Math.max(2, Math.min(N - 2, Math.round(t * N)));
   const w = Math.max(3, Math.min(k, N - k));
   for (let i = 1; i < N; i++) {
@@ -56,12 +63,13 @@ function pluck(t, amp) {
     u[i] += f * amp;
   }
 }
-function stepString() {
+function stepString(S) {
+  const { u, v } = S;
   for (let s = 0; s < 3; s++) {
     for (let i = 1; i < N; i++) v[i] += 0.38 * (u[i - 1] - 2 * u[i] + u[i + 1]);
     let e = 0;
     for (let i = 1; i < N; i++) { v[i] *= 0.9965; u[i] += v[i]; e += Math.abs(u[i]); }
-    energy = e / N;
+    S.energy = e / N;
   }
 }
 
@@ -70,7 +78,8 @@ let landmarker = null, useCam = false;
 let frame = { hands: [], sides: null, tips: [] };
 const TIPS = [4, 8, 12, 16, 20];           // tous les bouts de doigts peuvent gratter la corde posée
 const pin = [false, false];                // pincement avec hystérésis (gauche, droite)
-const line = { mode: "none", A: null, B: null, placedAt: 0, idle: 0 };  // none | drawing | placed
+const line = { mode: "none", A: null, B: null, idle: 0 };  // none | drawing (la corde en cours de tracé)
+const draft = newString({ x: 0, y: 0 }, { x: 0, y: 0 });
 
 function toScreen(l) {
   const vw = video.videoWidth, vh = video.videoHeight;
@@ -104,9 +113,9 @@ addEventListener("pointermove", e => {
   if (!useCam && ptr.down) line.B = { x: ptr.x, y: ptr.y };
 });
 addEventListener("pointerdown", e => {
-  if (useCam || !startEl.classList.contains("hidden")) return;
+  if (useCam || e.target.closest("button") || !startEl.classList.contains("hidden")) return;
   ptr.x = e.clientX; ptr.y = e.clientY; ptr.down = true;
-  line.mode = "drawing"; line.A = { x: ptr.x, y: ptr.y }; line.B = { ...line.A }; u.fill(0); v.fill(0);
+  line.mode = "drawing"; line.A = { x: ptr.x, y: ptr.y }; line.B = { ...line.A };
 });
 addEventListener("pointerup", () => {
   if (useCam || !ptr.down) return;
@@ -116,9 +125,12 @@ addEventListener("pointerup", () => {
 /* ---------------- Tracer / poser la corde ---------------- */
 function settle() {
   const L = Math.hypot(line.B.x - line.A.x, line.B.y - line.A.y);
-  if (L < 80) { line.mode = "none"; return; }
-  line.mode = "placed"; line.placedAt = performance.now(); prevSide.clear();
-  u.fill(0); v.fill(0); pluck(0.5, 10); note(freqFromLength(L), 0.1);
+  line.mode = "none";
+  if (L < 80) return;
+  const S = newString(line.A, line.B);
+  strings.push(S);
+  if (strings.length > MAX_STRINGS) strings.shift();
+  pluck(S, 0.5, 10); note(freqFromLength(L), 0.1);
 }
 function updateLine() {
   if (!useCam) return;
@@ -127,7 +139,6 @@ function updateLine() {
     if (s && s[0].pinch && s[1].pinch) {      // deux mains pincées : on commence à tracer
       line.mode = "drawing"; line.idle = 0;
       line.A = { ...s[0].mid }; line.B = { ...s[1].mid };
-      u.fill(0); v.fill(0);
     }
     return;
   }
@@ -140,25 +151,26 @@ function updateLine() {
 
 /* ---------------- Détection du passage d'un doigt ---------------- */
 const prevSide = new Map();
-function detectPlucks(A, B) {
+function detectPlucks(S) {
+  const { A, B } = S;
   const dx = B.x - A.x, dy = B.y - A.y, L = Math.hypot(dx, dy) || 1;
   const ux = dx / L, uy = dy / L, nx = -uy, ny = ux;
   for (const p of frame.tips) {
     const d = (p.x - A.x) * nx + (p.y - A.y) * ny;
     const t = ((p.x - A.x) * ux + (p.y - A.y) * uy) / L;
-    const prev = prevSide.get(p.id);
-    prevSide.set(p.id, d);
+    const key = S.id + ":" + p.id, prev = prevSide.get(key);
+    prevSide.set(key, d);
     if (prev === undefined || t < 0.05 || t > 0.95) continue;
-    if (performance.now() - line.placedAt < 400) continue;   // laisse les doigts se dégager
+    if (performance.now() - S.placedAt < 400) continue;   // laisse les doigts se dégager
     if (Math.sign(prev) !== Math.sign(d) && Math.abs(prev - d) < 160 && Math.abs(prev - d) > 3) {
       const speed = Math.abs(prev - d);
       const amp = Math.min(46, 10 + speed * 1.6) * Math.sign(d - prev) * -1;
-      pluck(t, amp);
+      pluck(S, t, amp);
       note(freqFromLength(L), Math.min(0.35, 0.06 + speed / 120));
-      hue = (hue + 47) % 360;
+      S.hue = (S.hue + 47) % 360;
       for (let i = 0; i < 14; i++) sparks.push({
         x: A.x + dx * t, y: A.y + dy * t,
-        vx: (Math.random() - .5) * 3, vy: (Math.random() - .5) * 3, life: 1, h: hue });
+        vx: (Math.random() - .5) * 3, vy: (Math.random() - .5) * 3, life: 1, h: S.hue });
     }
   }
 }
@@ -176,7 +188,8 @@ function drawHands() {
     for (const p of h) { ctx.beginPath(); ctx.arc(p.x, p.y, 4, 0, 7); ctx.fill(); }
   }
 }
-function drawString(A, B, a) {
+function drawString(S, a) {
+  const { A, B, u, hue } = S;
   const dx = B.x - A.x, dy = B.y - A.y, L = Math.hypot(dx, dy) || 1;
   const ux = dx / L, uy = dy / L, nx = -uy, ny = ux;
   const pts = [];
@@ -185,7 +198,7 @@ function drawString(A, B, a) {
     pts.push([A.x + dx * t + nx * u[i], A.y + dy * t + ny * u[i]]);
   }
   const path = () => { ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); };
-  const glow = Math.min(1, energy / 6);
+  const glow = Math.min(1, S.energy / 6);
 
   ctx.save(); ctx.globalAlpha = a;
   // graduations
@@ -246,8 +259,8 @@ function loop(now) {
   }
   drawHands();
   updateLine();
-  if (line.mode === "placed") { detectPlucks(line.A, line.B); stepString(); }
-  if (line.mode !== "none") drawString(line.A, line.B, 1);
+  for (const S of strings) { detectPlucks(S); stepString(S); drawString(S, 1); }
+  if (line.mode === "drawing") { draft.A = line.A; draft.B = line.B; drawString(draft, 1); }
   drawSparks();
 }
 
@@ -276,3 +289,5 @@ document.getElementById("go").onclick = async () => {
   startEl.classList.add("hidden");
 };
 requestAnimationFrame(loop);
+
+document.getElementById("clear").onclick = () => { strings.length = 0; prevSide.clear(); };
